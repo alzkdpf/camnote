@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CamNote</title><link rel="stylesheet" href="app.css"><script src="app.js" defer></script></head>
+<body>
+<svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-camera" viewBox="0 0 24 24"><path d="M8 5 6 8H3v12h18V8h-3l-2-3Z"/><circle cx="12" cy="13" r="4"/></symbol>
+<symbol id="i-library" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 9v11"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 9a8 8 0 1 0-1 9M20 3v6h-6"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="2"/><path d="m3 17 5-5 4 4 4-6 5 7"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5ZM15 3v5h4M8 12h8M8 16h6"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4M10 5h4"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+</defs></svg>
+<aside class="sidebar">
+  <div class="app-name"><svg><use href="#i-camera"/></svg><span>CamNote</span></div>
+  <nav aria-label="주요 메뉴">
+    <button id="nav-camera" class="nav-item active"><svg><use href="#i-camera"/></svg>카메라</button>
+    <button id="nav-library" class="nav-item"><svg><use href="#i-library"/></svg>보관함<span id="count" class="count">0</span></button>
+  </nav>
+  <div class="sidebar-label">최근 장면</div>
+  <div id="recent" class="recent-list"></div>
+  <div class="sidebar-bottom"><button id="nav-settings" class="nav-item"><svg><use href="#i-settings"/></svg>설정</button><div id="vault-state" class="vault-state">Obsidian 연결 안 됨</div></div>
+</aside>
+<main>
+ <header class="toolbar"><div><h1 id="page-title">카메라</h1><span id="page-subtitle">iPhone 또는 Mac 카메라로 촬영하세요.</span></div><button id="import" class="button"><svg><use href="#i-plus"/></svg>이미지 가져오기</button></header>
+ <div id="notice" class="notice" role="alert" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="알림 닫기"><svg><use href="#i-close"/></svg></button></div>
+ <section id="camera-view" class="view camera-view">
+   <div class="camera-source"><label for="device">카메라</label><select id="device"><option value="">카메라 검색 중…</option></select><button id="refresh" class="icon-button" title="카메라 목록 새로고침" aria-label="카메라 목록 새로고침"><svg><use href="#i-refresh"/></svg></button><span id="device-state" class="quiet"></span></div>
+   <div id="viewfinder" class="viewfinder">
+     <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" id="live-image" alt="카메라 미리보기" hidden>
+     <div id="camera-idle" class="camera-idle"><svg class="empty-icon"><use href="#i-camera"/></svg><h2>새 장면 촬영</h2><p id="camera-hint">카메라를 켜고 저장할 장면을 골라보세요.</p><button id="start" class="button primary large"><svg><use href="#i-camera"/></svg>카메라 시작</button><button id="iphone-help" class="text-button">iPhone 연결 방법</button></div>
+     <div id="connecting" class="connecting" hidden><span class="spinner"></span><strong>카메라 연결 중</strong><p>iPhone을 잠근 상태로 가까이 거치해 주세요.</p></div>
+     <span id="live-tag" class="live-tag" hidden><span></span>미리보기</span>
+   </div>
+   <div class="capture-controls"><p id="camera-footnote">시작 버튼을 누를 때만 카메라가 켜집니다.</p><div id="live-controls" hidden><button id="stop" class="button">카메라 끄기</button><button id="capture" class="button primary large" disabled><svg><use href="#i-camera"/></svg>장면 촬영<span class="key">Space</span></button></div></div>
+   <details id="connection-help" class="connection-help"><summary>iPhone을 카메라로 연결하기</summary><div><svg><use href="#i-phone"/></svg><p>Mac과 iPhone에 같은 Apple 계정으로 로그인하고 Wi-Fi와 Bluetooth를 켜세요. iPhone의 <strong>설정 → 일반 → AirPlay 및 연속성 → 연속성 카메라</strong>를 켠 뒤, 잠금 상태로 Mac 가까이에 거치하세요. USB로 연결해도 됩니다.</p></div><p>준비되면 위에서 카메라 목록을 새로고침하고 iPhone 카메라를 선택하세요. 책상 위 촬영은 데스크뷰 카메라를 선택합니다.</p></details>
+ </section>
+ <section id="library-view" class="view" hidden><div id="library-grid" class="library-grid"></div><div id="library-empty" class="empty-library" hidden><svg class="empty-icon"><use href="#i-library"/></svg><h2>촬영한 장면이 여기에 모입니다.</h2><p>카메라로 촬영하거나 저장된 이미지를 가져오세요.</p><button id="first-capture" class="button primary">카메라 열기</button></div></section>
+ <section id="scene-view" class="scene-view" hidden>
+  <div class="scene-media"><div class="media-toolbar"><div class="segmented" role="group" aria-label="이미지 보기"><button id="original" class="selected">원본</button><button id="generated" hidden>생성 이미지</button></div><button id="new-capture" class="text-button">새로 촬영</button></div><div class="scene-image-wrap"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" id="scene-image" alt="선택한 장면"></div><div class="image-action"><button id="transform-toggle" class="button"><svg><use href="#i-image"/></svg>이미지 변환</button><span class="quiet">원본은 그대로 보관됩니다.</span></div><div id="transform-form" class="transform-form" hidden><label for="image-prompt">어떻게 바꿀까요?</label><textarea id="image-prompt" rows="3" placeholder="예: 구도를 유지하고 수채화 일러스트로 바꿔줘"></textarea><div><span class="quiet">Codex 이미지 생성</span><button id="transform" class="button primary">새 이미지 만들기</button></div></div><details class="additional"><summary>추가 작업</summary><button id="diagram" class="button">SVG 도식으로 저장</button></details><div id="job-status" class="job-status" role="status" hidden><span class="spinner"></span><div><strong id="job-title"></strong><p id="job-detail"></p></div></div></div>
+  <div class="note-pane"><div class="note-heading"><h2>노트</h2><span id="save-state" class="quiet"></span></div><div id="note-empty" class="note-empty"><svg><use href="#i-note"/></svg><h3>이 장면을 노트로 남기세요.</h3><p>내용을 요약하고, 보이는 글자와 다음 할 일을 정리합니다.</p><button id="summarize" class="button primary">텍스트로 정리</button><button id="write-manually" class="text-button">직접 작성하기</button></div><textarea id="note" class="note-editor" aria-label="노트 내용" placeholder="이 장면에 대한 메모를 남겨보세요." hidden></textarea><div id="note-actions" class="note-actions" hidden><button id="resummarize" class="text-button">다시 정리</button><button id="send" class="button primary">Obsidian으로 보내기<svg><use href="#i-arrow"/></svg></button><button id="reopen" class="button" hidden>Obsidian에서 열기</button></div></div>
+ </section>
+ <section id="settings-view" class="view settings-view" hidden>
+   <section class="settings-group"><h2>Obsidian</h2><p>노트와 원본·생성 이미지를 선택한 vault에 함께 저장합니다.</p><label for="vault">Vault 폴더</label><div class="field-row"><input id="vault" readonly placeholder="저장할 vault를 선택하세요"><button id="choose-vault" class="button">폴더 선택</button></div><div class="setting-row"><div><strong>Obsidian에서도 Codex로 작업하기</strong><p>첨부 장면을 정리하고 새 이미지로 변환하는 명령을 추가합니다.</p></div><button id="install-plugin" class="button">플러그인 설치</button></div><p class="quiet">설치 후 Obsidian의 커뮤니티 플러그인에서 CamNote를 켜세요.</p></section>
+   <section class="settings-group"><h2>텍스트 정리</h2><div class="field-row"><div><label for="provider">실행 방식</label><select id="provider"><option>Codex</option><option>Ollama</option></select></div><div class="grow"><label for="model">모델 이름 <span class="quiet">선택 사항</span></label><input id="model" placeholder="Codex 기본 모델 사용"></div></div><p id="provider-help" class="quiet">Codex는 이 Mac에서 실행되며 온라인 모델을 사용할 수 있습니다.</p><label for="instruction">정리 지시</label><textarea id="instruction" rows="3"></textarea></section>
+   <details class="settings-group advanced"><summary>고급 설정</summary><label for="codex">Codex 실행 파일</label><input id="codex"><label for="ffmpeg">FFmpeg 실행 파일</label><input id="ffmpeg"><p class="quiet">카메라 연결 로그는 프로젝트 data/camera.log에 저장됩니다.</p></details><div class="settings-footer"><span id="settings-status" role="status"></span><button id="save-settings" class="button primary">설정 저장</button></div>
+ </section>
+</main>
+</body></html>
