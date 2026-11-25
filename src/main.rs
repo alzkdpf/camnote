@@ -1,5 +1,6 @@
 mod core;
 mod edit;
+mod recording;
 mod storage;
 use base64::Engine;
 use core::*;
@@ -24,12 +25,17 @@ fn frontend_ready(report: serde_json::Value) -> Result<(), String> {
 
 struct Live {
     child: Child,
+    recording: Option<PathBuf>,
     frame: Arc<Mutex<Option<(Vec<u8>, Instant)>>>,
 }
 impl Drop for Live {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.recording.is_some() {
+            let _ = recording::finish(&mut self.child);
+        } else {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 #[derive(Default)]
@@ -38,6 +44,7 @@ struct Runtime {
     settings: Mutex<Settings>,
     job: Mutex<bool>,
     pending_files: Mutex<Vec<String>>,
+    finalization: recording::Finalization,
 }
 #[derive(Serialize)]
 struct Scene {
@@ -259,7 +266,11 @@ fn pick_vault() -> Option<String> {
 }
 #[tauri::command]
 fn stop_camera(state: tauri::State<Runtime>) -> Result<(), String> {
-    state.live.lock().map_err(err)?.take();
+    let mut live = state.live.lock().map_err(err)?;
+    if live.as_ref().is_some_and(|l| l.recording.is_some()) {
+        return Err("먼저 녹화를 중지해 저장하세요".into());
+    }
+    live.take();
     Ok(())
 }
 #[derive(Clone, Serialize)]
@@ -274,17 +285,48 @@ fn start_camera(
     app: tauri::AppHandle,
     state: tauri::State<Runtime>,
 ) -> Result<(), String> {
+    launch_camera(name, session, app, state, None)
+}
+fn launch_camera(
+    name: String,
+    session: String,
+    app: tauri::AppHandle,
+    state: tauri::State<Runtime>,
+    recording: Option<PathBuf>,
+) -> Result<(), String> {
+    if state.finalization.is_running() {
+        return Err("동영상 저장이 끝난 뒤 카메라를 시작하세요".into());
+    }
     if *state.job.lock().map_err(err)? {
         return Err("작업이 끝난 뒤 카메라를 시작하세요".into());
     }
     let mut live = state.live.lock().map_err(err)?;
+    if live.as_ref().is_some_and(|l| l.recording.is_some()) {
+        return Err("이미 녹화 중입니다".into());
+    }
     live.take();
     let mut s = state.settings.lock().map_err(err)?.clone();
     s.camera_name = name.clone();
     save_settings(&s)?;
     *state.settings.lock().map_err(err)? = s.clone();
     fs::create_dir_all(root()).map_err(err)?;
-    let mut child=Command::new(s.ffmpeg).args(["-hide_banner","-loglevel","warning","-f","avfoundation","-framerate","30","-i",&format!("{name}:none"),"-vf","fps=8,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2","-pix_fmt","rgb24","-f","rawvideo","pipe:1"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(fs::File::create(root().join("camera.log")).map_err(err)?).spawn().map_err(err)?;
+    let mut command = Command::new(s.ffmpeg);
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-n",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "30",
+        "-i",
+        &format!("{name}:none"),
+    ]);
+    if let Some(path) = &recording {
+        recording::output_args(&mut command, path);
+    }
+    let mut child=command.args(["-map","0:v:0","-vf","fps=8,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2","-pix_fmt","rgb24","-f","rawvideo","pipe:1"]).stdin(if recording.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(fs::File::create(root().join(if recording.is_some(){"recording.log"}else{"camera.log"})).map_err(err)?).spawn().map_err(err)?;
     let mut output = child.stdout.take().ok_or("카메라 출력 없음")?;
     let frame = Arc::new(Mutex::new(None));
     let latest = frame.clone();
@@ -317,13 +359,20 @@ fn start_camera(
         }
         let _ = app.emit("camera-ended", session_clone);
     });
-    *live = Some(Live { child, frame });
+    *live = Some(Live {
+        child,
+        frame,
+        recording,
+    });
     Ok(())
 }
 #[tauri::command]
 fn capture(state: tauri::State<Runtime>) -> Result<Scene, String> {
     let mut live = state.live.lock().map_err(err)?;
     let cam = live.as_ref().ok_or("카메라를 먼저 시작하세요")?;
+    if cam.recording.is_some() {
+        return Err("녹화 중에는 장면을 촬영할 수 없습니다".into());
+    }
     let bytes = {
         let frame = cam.frame.lock().map_err(err)?;
         let (bytes, when) = frame.as_ref().ok_or("영상이 아직 도착하지 않았습니다")?;
@@ -335,6 +384,83 @@ fn capture(state: tauri::State<Runtime>) -> Result<Scene, String> {
     let p = save_frame(&bytes, 1280, 720)?;
     live.take();
     scene(&p)
+}
+#[tauri::command]
+fn start_recording(
+    name: String,
+    session: String,
+    app: tauri::AppHandle,
+    state: tauri::State<Runtime>,
+) -> Result<(), String> {
+    let path = recording::new_path()?;
+    launch_camera(name, session, app, state, Some(path))
+}
+#[tauri::command]
+async fn stop_recording(state: tauri::State<'_, Runtime>) -> Result<recording::Video, String> {
+    let ticket = state.finalization.begin()?;
+    let mut live = {
+        let mut guard = state.live.lock().map_err(err)?;
+        if !guard.as_ref().is_some_and(|l| l.recording.is_some()) {
+            return Err("녹화 중이 아닙니다".into());
+        }
+        guard.take().unwrap()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ticket = ticket;
+        let path = live.recording.take().unwrap();
+        recording::finish(&mut live.child)?;
+        let info = recording::info(&path)?;
+        if info.bytes == 0 || live.frame.lock().map_err(err)?.is_none() {
+            return Err(
+                "영상이 저장되지 않았습니다. 카메라 연결과 recording.log를 확인하세요.".into(),
+            );
+        }
+        Ok(info)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
+fn recordings() -> Result<Vec<recording::Video>, String> {
+    recording::list()
+}
+#[tauri::command]
+async fn save_video(path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = recording::safe(&path)?;
+        let Some(dest) = rfd::FileDialog::new()
+            .set_title("동영상 다른 이름으로 저장")
+            .set_file_name(source.file_name().unwrap().to_string_lossy())
+            .add_filter("MP4 동영상", &["mp4"])
+            .save_file()
+        else {
+            return Ok(None);
+        };
+        if dest
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_none_or(|s| !s.eq_ignore_ascii_case("mp4"))
+        {
+            return Err("MP4 확장자로 저장하세요".into());
+        }
+        recording::copy_new(&source, &dest)?;
+        Ok(Some(dest.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
+fn open_video(path: String, reveal: bool) -> Result<(), String> {
+    let path = recording::safe(&path)?;
+    let mut command = Command::new("/usr/bin/open");
+    if reveal {
+        command.arg("-R");
+    }
+    command.arg(path);
+    if !command.status().map_err(err)?.success() {
+        return Err("동영상을 열 수 없습니다".into());
+    }
+    Ok(())
 }
 #[tauri::command]
 fn save_note(path: String, body: String) -> Result<(), String> {
@@ -424,7 +550,7 @@ async fn recover_data(
     }
     let result = tauri::async_runtime::spawn_blocking(|| {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("이전 CamNote 데이터 폴더 선택 (scenes 폴더의 상위)")
+            .set_title("이전 CamNote 데이터 폴더 선택 (scenes 또는 recordings의 상위)")
             .pick_folder()
         else {
             return Ok(None);
@@ -455,6 +581,11 @@ fn main() {
             ..Default::default()
         })
         .invoke_handler(tauri::generate_handler![
+            start_recording,
+            stop_recording,
+            recordings,
+            save_video,
+            open_video,
             storage_status,
             recover_data,
             frontend_ready,
@@ -523,6 +654,7 @@ fn main() {
                     if let Ok(mut live) = state.live.lock() {
                         live.take();
                     }
+                    state.finalization.wait();
                 }
             }
         });

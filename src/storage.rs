@@ -123,13 +123,18 @@ pub fn recover(source: &Path, dest: &Path) -> Result<Recovery, String> {
         return Err("현재 저장소 또는 그 하위·상위 폴더에서는 복구할 수 없습니다".into());
     }
     let scenes = files(&source.join("scenes"))?;
-    if !scenes.iter().any(|p| {
-        matches!(
-            p.extension().and_then(|s| s.to_str()),
-            Some("png" | "jpg" | "jpeg")
-        )
-    }) {
-        return Err("scenes 폴더에 사진이 있는 CamNote 데이터 폴더를 선택하세요".into());
+    let recordings = files(&source.join("recordings"))?;
+    if recordings.is_empty()
+        && !scenes.iter().any(|p| {
+            matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("png" | "jpg" | "jpeg")
+            )
+        })
+    {
+        return Err(
+            "scenes 또는 recordings 폴더에 자료가 있는 CamNote 데이터 폴더를 선택하세요".into(),
+        );
     }
     let id = source_id(&source);
     let marker = dest.join("recovery").join(&id).join("complete.json");
@@ -154,6 +159,30 @@ pub fn recover(source: &Path, dest: &Path) -> Result<Recovery, String> {
                 &mut report,
             )?;
         }
+    }
+    for p in &recordings {
+        let name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or("파일 이름 오류")?;
+        if p.extension().and_then(|s| s.to_str()) != Some("mp4") {
+            continue;
+        }
+        let dir = dest.join("recordings");
+        let mut target = dir.join(name);
+        let mut n = 0;
+        while fs::symlink_metadata(&target).is_ok() {
+            target = dir.join(format!("recovered-{id}-{n}-{name}"));
+            n += 1;
+        }
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(err)?;
+        crate::recording::copy_new(p, &target)?;
+        report.copied += 1;
     }
     let mut names = BTreeMap::new();
     for p in &generated {
@@ -441,6 +470,23 @@ mod tests {
             )
             .unwrap(),
             b"old"
+        );
+    }
+    #[test]
+    fn video_only_backup_recovers_without_photos_and_remains_after_retry() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        fs::create_dir(old.path().join("recordings")).unwrap();
+        fs::write(old.path().join("recordings/v.mp4"), b"video").unwrap();
+        recover(old.path(), new.path()).unwrap();
+        assert_eq!(
+            fs::read(new.path().join("recordings/v.mp4")).unwrap(),
+            b"video"
+        );
+        assert!(recover(old.path(), new.path()).unwrap().already_done);
+        assert_eq!(
+            fs::read(old.path().join("recordings/v.mp4")).unwrap(),
+            b"video"
         );
     }
 }

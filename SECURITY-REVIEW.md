@@ -1,4 +1,4 @@
-# Public preview review — v0.3.1
+# Public preview review — v0.4.0
 
 Review date: 2026-11-25. Scope: CamNote-specific Rust, frontend, Obsidian plugin, tracked-file selection and Apple Silicon release packaging. This is a developer review and automated scan, not an independent penetration test or security certification.
 
@@ -15,13 +15,17 @@ Review date: 2026-11-25. Scope: CamNote-specific Rust, frontend, Obsidian plugin
 - Photo chat persists private history and filename-only version references. Model recipes reject unknown fields and out-of-range or nonfinite values. Pixel edits execute in Rust; model code is never executed. Original imported files are preserved. HEIC decoding uses the system sips executable with argument arrays.
 - File associations accept explicitly opened image files. AirDrop receipt remains an OS action; Downloads is not monitored.
 
-- Legacy recovery is limited to the known user data path or an explicitly selected folder. It rejects symlinks, preserves originals, stages private files before an atomic no-replace link, and never overwrites current settings or notes. Recovery copies contain private data and stay outside the source repository and release.
+- Legacy recovery is limited to the known user data path or an explicitly selected folder. It rejects symlinks, preserves originals, stages private photo/sidecar files before an atomic no-replace link, streams restored videos to exclusive new files, and never overwrites current settings or notes. Recovery copies contain private data and stay outside the source repository and release.
+
+- Video recording invokes FFmpeg with argument arrays and no audio device, writes only to the private user recordings directory, and uses unique filenames with no-overwrite mode. Export streams to an exclusively created file. Playback and Finder reveal accept only canonical MP4 paths inside the recordings directory. No video content is sent to any model.
+- Normal app exit waits for recording finalization, including a background stop/save already in progress. Fragmented MP4 limits metadata loss on interrupted writes but does not guarantee complete recovery.
 
 ## Verification
 
-- Sixteen Rust tests cover camera-list filtering, existing note preservation, active SVG content, generated-image path escapes, attachment symlinks, atomic note writes and model Markdown escaping.
+- Nineteen Rust tests cover camera-list filtering, existing note preservation, active SVG content, generated-image path escapes, attachment symlinks, atomic note writes and model Markdown escaping.
 - The Node test checks Obsidian command arguments, no-shell execution, separate result notes and source preservation. Frontend and plugin scripts pass syntax checks.
 - A synthetic image was processed by Codex for text and raster output using the isolated configuration flags. This does not test every account, CLI version, model or image-generation entitlement.
+- An opt-in synthetic FFmpeg integration test checks dual preview/MP4 output, graceful stop, 720p H.264 at 30fps, no audio stream, full decode, and a second recording preserving the first. Browser fixtures cover start/stop, timer, disabled controls, saved list and file actions at normal and minimum window sizes. Real iPhone recording was not exercised.
 - A separate, opt-in live test passed three Codex chat turns (two cumulative pixel corrections and one discussion), history persistence, version restoration and original-file preservation. Native HEIC open was verified both on launch and while running. Wireless AirDrop and live Ollama were not tested.
 - Gitleaks 8.30.1 scans the source-only tree and Git history with redaction enabled. Its downloaded archive is checked against the publisher's SHA-256 manifest.
 - cargo-audit 0.23.0 against the RustSec database reports zero known vulnerabilities in the lockfile. Six informational warnings remain: chrono (RUSTSEC-2026-0543), proc-macro-error (RUSTSEC-2024-0370), zbus_names (RUSTSEC-2026-0371), zvariant (RUSTSEC-2026-0370), zvariant_derive (RUSTSEC-2026-0372), and glib (RUSTSEC-2024-0429). None is in the resolved `aarch64-apple-darwin` build graph; they remain optional or other-platform lockfile entries. They are not silently ignored, and other platforms are not supported by this release.
