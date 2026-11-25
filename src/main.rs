@@ -1,5 +1,6 @@
 mod core;
 mod edit;
+mod storage;
 use base64::Engine;
 use core::*;
 use serde::Serialize;
@@ -406,10 +407,47 @@ async fn process_scene(
     *state.job.lock().map_err(err)? = false;
     result?
 }
+#[tauri::command]
+fn storage_status() -> storage::Status {
+    storage::status()
+}
+#[tauri::command]
+async fn recover_data(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Option<storage::Recovery>, String> {
+    {
+        let mut busy = state.job.lock().map_err(err)?;
+        if *busy {
+            return Err("현재 작업을 완료한 뒤 복구하세요".into());
+        }
+        *busy = true;
+    }
+    let result = tauri::async_runtime::spawn_blocking(|| {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("이전 CamNote 데이터 폴더 선택 (scenes 폴더의 상위)")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        storage::recover(&path, &root()).map(Some)
+    })
+    .await
+    .map_err(err)
+    .and_then(|r| r);
+    *state.job.lock().map_err(err)? = false;
+    if result.is_ok() {
+        *state.settings.lock().map_err(err)? = load_settings();
+    }
+    result
+}
 fn main() {
     if let Err(error) = init_data() {
         eprintln!("CamNote data initialization failed: {error}");
         std::process::exit(1);
+    }
+    if let Err(error) = storage::auto_recover() {
+        eprintln!("CamNote recovery failed: {error}");
+        rfd::MessageDialog::new().set_title("CamNote 데이터 복구").set_description(format!("이전 자료의 자동 복구를 완료하지 못했습니다. 원본은 보존되어 있습니다. 설정의 이전 데이터 복구에서 다시 시도하세요.\n{error}")).show();
     }
     tauri::Builder::default()
         .manage(Runtime {
@@ -417,6 +455,8 @@ fn main() {
             ..Default::default()
         })
         .invoke_handler(tauri::generate_handler![
+            storage_status,
+            recover_data,
             frontend_ready,
             take_open_photos,
             settings,

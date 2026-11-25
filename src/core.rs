@@ -131,11 +131,14 @@ pub fn root() -> PathBuf {
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir)
+                .unwrap_or_default()
                 .join("Library/Application Support/CamNote")
         })
 }
 pub fn init_data() -> Result<(), String> {
+    if !root().is_absolute() {
+        return Err("저장 위치를 찾을 수 없습니다. HOME 또는 절대 경로의 CAMNOTE_DATA를 확인하세요. 임시 폴더에는 저장하지 않습니다.".into());
+    }
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     fs::DirBuilder::new()
         .recursive(true)

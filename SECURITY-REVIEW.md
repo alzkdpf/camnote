@@ -1,4 +1,4 @@
-# Public preview review — v0.3.0
+# Public preview review — v0.3.1
 
 Review date: 2026-11-25. Scope: CamNote-specific Rust, frontend, Obsidian plugin, tracked-file selection and Apple Silicon release packaging. This is a developer review and automated scan, not an independent penetration test or security certification.
 
@@ -15,9 +15,11 @@ Review date: 2026-11-25. Scope: CamNote-specific Rust, frontend, Obsidian plugin
 - Photo chat persists private history and filename-only version references. Model recipes reject unknown fields and out-of-range or nonfinite values. Pixel edits execute in Rust; model code is never executed. Original imported files are preserved. HEIC decoding uses the system sips executable with argument arrays.
 - File associations accept explicitly opened image files. AirDrop receipt remains an OS action; Downloads is not monitored.
 
+- Legacy recovery is limited to the known user data path or an explicitly selected folder. It rejects symlinks, preserves originals, stages private files before an atomic no-replace link, and never overwrites current settings or notes. Recovery copies contain private data and stay outside the source repository and release.
+
 ## Verification
 
-- Eleven Rust tests cover camera-list filtering, existing note preservation, active SVG content, generated-image path escapes, attachment symlinks, atomic note writes and model Markdown escaping.
+- Sixteen Rust tests cover camera-list filtering, existing note preservation, active SVG content, generated-image path escapes, attachment symlinks, atomic note writes and model Markdown escaping.
 - The Node test checks Obsidian command arguments, no-shell execution, separate result notes and source preservation. Frontend and plugin scripts pass syntax checks.
 - A synthetic image was processed by Codex for text and raster output using the isolated configuration flags. This does not test every account, CLI version, model or image-generation entitlement.
 - A separate, opt-in live test passed three Codex chat turns (two cumulative pixel corrections and one discussion), history persistence, version restoration and original-file preservation. Native HEIC open was verified both on launch and while running. Wireless AirDrop and live Ollama were not tested.
