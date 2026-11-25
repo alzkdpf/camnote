@@ -1,4 +1,5 @@
 mod core;
+mod edit;
 use base64::Engine;
 use core::*;
 use serde::Serialize;
@@ -35,6 +36,7 @@ struct Runtime {
     live: Mutex<Option<Live>>,
     settings: Mutex<Settings>,
     job: Mutex<bool>,
+    pending_files: Mutex<Vec<String>>,
 }
 #[derive(Serialize)]
 struct Scene {
@@ -43,6 +45,9 @@ struct Scene {
     preview: String,
     body: String,
     generated: Option<String>,
+    title: Option<String>,
+    chat: edit::History,
+    chat_error: Option<String>,
 }
 fn preview(path: &Path) -> Result<String, String> {
     let img = image::open(path).map_err(err)?.thumbnail(1400, 1000);
@@ -63,17 +68,33 @@ fn safe_scene(path: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 fn scene(p: &Path) -> Result<Scene, String> {
+    let (chat, chat_error) = match edit::load(p) {
+        Ok(h) => (h, None),
+        Err(e) => (edit::History::default(), Some(e)),
+    };
     Ok(Scene {
         path: p.to_string_lossy().into(),
         name: p.file_stem().unwrap_or_default().to_string_lossy().into(),
         preview: preview(p)?,
         body: fs::read_to_string(p.with_extension("md")).unwrap_or_default(),
         generated: generated_image(p).and_then(|g| preview(&g).ok()),
+        title: fs::read(p.with_extension("source.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["name"].as_str().map(str::to_owned)),
+        chat,
+        chat_error,
     })
 }
 #[tauri::command]
 fn settings(state: tauri::State<Runtime>) -> Settings {
     state.settings.lock().unwrap().clone()
+}
+#[tauri::command]
+fn take_open_photos(state: tauri::State<Runtime>) -> Result<Vec<String>, String> {
+    let mut queue = state.pending_files.lock().map_err(err)?;
+    let n = queue.len().min(8);
+    Ok(queue.drain(..n).collect())
 }
 #[tauri::command]
 fn update_settings(value: Settings, state: tauri::State<Runtime>) -> Result<(), String> {
@@ -97,14 +118,136 @@ async fn library() -> Result<Vec<Scene>, String> {
     .map_err(err)?
 }
 #[tauri::command]
-fn pick_image() -> Result<Option<Scene>, String> {
-    match rfd::FileDialog::new()
-        .add_filter("이미지", &["png", "jpg", "jpeg"])
-        .pick_file()
-    {
-        Some(p) => scene(&import(&p)?).map(Some),
-        None => Ok(None),
+fn choose_photos() -> Option<Vec<String>> {
+    rfd::FileDialog::new()
+        .set_title("사진 불러오기")
+        .add_filter("사진", &["png", "jpg", "jpeg", "webp", "heic", "heif"])
+        .pick_files()
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        })
+}
+#[derive(Serialize)]
+struct Imports {
+    scenes: Vec<Scene>,
+    errors: Vec<String>,
+}
+#[tauri::command]
+async fn import_photos(
+    paths: Vec<String>,
+    state: tauri::State<'_, Runtime>,
+) -> Result<Imports, String> {
+    if paths.is_empty() || paths.len() > 8 {
+        return Err("한 번에 사진 1~8장을 선택하세요".into());
     }
+    {
+        let mut job = state.job.lock().map_err(err)?;
+        if *job {
+            return Err("작업이 끝난 뒤 사진을 불러오세요".into());
+        }
+        *job = true;
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut output = Imports {
+            scenes: Vec::new(),
+            errors: Vec::new(),
+        };
+        for path in paths {
+            match import(Path::new(&path)).and_then(|p| scene(&p)) {
+                Ok(s) => output.scenes.push(s),
+                Err(e) => output.errors.push(format!(
+                    "{}: {e}",
+                    Path::new(&path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )),
+            }
+        }
+        output
+    })
+    .await
+    .map_err(err);
+    *state.job.lock().map_err(err)? = false;
+    result
+}
+#[tauri::command]
+async fn photo_chat(
+    path: String,
+    message: String,
+    mode: String,
+    state: tauri::State<'_, Runtime>,
+) -> Result<Scene, String> {
+    let p = safe_scene(&path)?;
+    let s = state.settings.lock().map_err(err)?.clone();
+    {
+        let mut job = state.job.lock().map_err(err)?;
+        if *job {
+            return Err("다른 작업이 진행 중입니다".into());
+        }
+        *job = true;
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        edit::chat(&s, &p, &message, &mode)?;
+        scene(&p)
+    })
+    .await
+    .map_err(err);
+    *state.job.lock().map_err(err)? = false;
+    result?
+}
+#[tauri::command]
+fn select_revision(
+    path: String,
+    id: Option<String>,
+    state: tauri::State<Runtime>,
+) -> Result<Scene, String> {
+    if *state.job.lock().map_err(err)? {
+        return Err("작업이 끝난 뒤 버전을 선택하세요".into());
+    }
+    let p = safe_scene(&path)?;
+    edit::select(&p, id)?;
+    scene(&p)
+}
+#[tauri::command]
+fn refresh_scene(path: String) -> Result<Scene, String> {
+    scene(&safe_scene(&path)?)
+}
+#[tauri::command]
+fn save_photo(path: String) -> Result<Option<String>, String> {
+    let p = safe_scene(&path)?;
+    let h = edit::load(&p)?;
+    let source = edit::current(&p, &h)?;
+    let Some(dest) = rfd::FileDialog::new()
+        .set_title("현재 사진 저장")
+        .set_file_name("CamNote-edited.png")
+        .add_filter("PNG", &["png"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    if dest
+        .extension()
+        .and_then(|v| v.to_str())
+        .is_none_or(|v| !v.eq_ignore_ascii_case("png"))
+    {
+        return Err("PNG 확장자로 저장하세요".into());
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&dest)
+        .map_err(|e| format!("기존 파일을 보존했습니다. 다른 이름을 선택하세요: {e}"))?;
+    image::open(source)
+        .map_err(err)?
+        .write_to(&mut output, image::ImageFormat::Png)
+        .map_err(err)?;
+    Ok(Some(dest.to_string_lossy().into()))
 }
 #[tauri::command]
 fn pick_vault() -> Option<String> {
@@ -238,16 +381,21 @@ async fn process_scene(
         match kind.as_str() {
             "image" => {
                 s.image_instruction = instruction;
-                generate_image(&s, &p)?;
+                let h = edit::load(&p)?;
+                let reference = edit::current(&p, &h)?;
+                let output = generate_image_from(&s, &p, &reference)?;
+                edit::register(&p, &output, "generate", &s.image_instruction, None)?;
             }
             "diagram" => {
-                generate(&s, &p, true)?;
+                let reference = edit::current(&p, &edit::load(&p)?)?;
+                generate(&s, &p, &reference, true)?;
             }
             "note" => {
                 if !instruction.trim().is_empty() {
                     s.instruction = instruction;
                 }
-                generate(&s, &p, false)?;
+                let reference = edit::current(&p, &edit::load(&p)?)?;
+                generate(&s, &p, &reference, false)?;
             }
             _ => return Err("지원하지 않는 작업".into()),
         }
@@ -270,11 +418,17 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             frontend_ready,
+            take_open_photos,
             settings,
             update_settings,
             devices,
             library,
-            pick_image,
+            choose_photos,
+            import_photos,
+            photo_chat,
+            select_revision,
+            refresh_scene,
+            save_photo,
             pick_vault,
             stop_camera,
             start_camera,
@@ -293,6 +447,34 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("CamNote 초기화 실패")
         .run(|app, event| {
+            if let tauri::RunEvent::Opened { ref urls } = event {
+                if let Some(state) = app.try_state::<Runtime>() {
+                    if let Ok(mut queue) = state.pending_files.lock() {
+                        for url in urls {
+                            if let Ok(path) = url.to_file_path() {
+                                let ext = path
+                                    .extension()
+                                    .and_then(|v| v.to_str())
+                                    .unwrap_or("")
+                                    .to_ascii_lowercase();
+                                if ["jpg", "jpeg", "png", "webp", "heic", "heif"]
+                                    .contains(&ext.as_str())
+                                {
+                                    let value = path.to_string_lossy().into_owned();
+                                    if !queue.contains(&value) {
+                                        queue.push(value);
+                                    }
+                                }
+                            }
+                        }
+                        let _ = app.emit("photos-available", ());
+                    }
+                }
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             if matches!(
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit

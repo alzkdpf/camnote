@@ -4,12 +4,19 @@
 <key>CFBundleName</key><string>CamNote</string>
 <key>CFBundleDisplayName</key><string>CamNote</string>
 <key>CFBundleIdentifier</key><string>local.camnote.desktop</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>0.2.1</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
 <key>CFBundleIconFile</key><string>CamNote</string>
 <key>CFBundleExecutable</key><string>CamNote</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSCameraUsageDescription</key><string>CamNote가 장면을 촬영해 로컬 노트로 저장하기 위해 카메라를 사용합니다.</string>
 <key>NSCameraUseContinuityCameraDeviceType</key><true/>
 <key>NSHighResolutionCapable</key><true/>
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>Photo</string>
+<key>CFBundleTypeRole</key><string>Editor</string>
+<key>LSHandlerRank</key><string>Alternate</string>
+<key>LSItemContentTypes</key><array><string>public.jpeg</string><string>public.png</string><string>public.heic</string><string>public.heif</string><string>org.webmproject.webp</string></array>
+<key>CFBundleTypeExtensions</key><array><string>jpg</string><string>jpeg</string><string>png</string><string>webp</string><string>heic</string><string>heif</string></array>
+</dict></array>
 </dict></plist>
