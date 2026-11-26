@@ -1,4 +1,7 @@
-use crate::core::{err, root};
+use crate::{
+    camera_control::Zoom,
+    core::{err, root},
+};
 use serde::Serialize;
 use std::{
     fs,
@@ -70,12 +73,13 @@ pub fn new_path() -> Result<PathBuf, String> {
         jiff::Timestamp::now().as_nanosecond()
     )))
 }
-pub fn output_args(cmd: &mut Command, path: &Path) {
+pub fn output_args(cmd: &mut Command, path: &Path, zoom: Zoom) {
+    let filter = zoom.video_filter();
     cmd.args([
         "-map",
         "0:v:0",
         "-vf",
-        "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        &filter,
         "-c:v",
         "libx264",
         "-preset",
@@ -201,9 +205,9 @@ mod tests {
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=1280x720:rate=30",
+            "color=red:size=1280x720:rate=30,drawbox=x=320:y=180:w=640:h=360:color=lime:t=fill",
         ]);
-        output_args(&mut cmd, &path);
+        output_args(&mut cmd, &path, Zoom::new(200).unwrap());
         cmd.args([
             "-map", "0:v:0", "-vf", "fps=8", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
         ])
@@ -260,6 +264,18 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        assert_eq!(decoded.stdout.len(), 1280 * 720 * 3);
+        for index in [0, 3 * 640, decoded.stdout.len() - 3] {
+            let pixel = &decoded.stdout[index..index + 3];
+            assert!(pixel[0] < 20 && pixel[1] > 200 && pixel[2] < 20);
+        }
         // A second recording uses a new path; the first must remain unchanged.
         let original = fs::read(&path).unwrap();
         let other = d.path().join("second.mp4");
@@ -275,7 +291,7 @@ mod tests {
             "-t",
             "1",
         ]);
-        output_args(&mut cmd, &other);
+        output_args(&mut cmd, &other, Zoom::ORIGINAL);
         assert!(cmd.status().unwrap().success());
         assert_eq!(fs::read(&path).unwrap(), original);
     }

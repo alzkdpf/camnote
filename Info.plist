@@ -4,8 +4,8 @@
 <key>CFBundleName</key><string>CamNote</string>
 <key>CFBundleDisplayName</key><string>CamNote</string>
 <key>CFBundleIdentifier</key><string>local.camnote.desktop</string>
-<key>CFBundleVersion</key><string>6</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleVersion</key><string>7</string>
+<key>CFBundleShortVersionString</key><string>0.4.1</string>
 <key>CFBundleIconFile</key><string>CamNote</string>
 <key>CFBundleExecutable</key><string>CamNote</string>
 <key>CFBundlePackageType</key><string>APPL</string>

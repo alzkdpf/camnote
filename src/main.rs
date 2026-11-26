@@ -1,8 +1,10 @@
+mod camera_control;
 mod core;
 mod edit;
 mod recording;
 mod storage;
 use base64::Engine;
+use camera_control::{FRAME_HEIGHT, FRAME_WIDTH, Zoom};
 use core::*;
 use serde::Serialize;
 use std::{
@@ -10,7 +12,10 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU16, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
@@ -25,6 +30,9 @@ fn frontend_ready(report: serde_json::Value) -> Result<(), String> {
 
 struct Live {
     child: Child,
+    session: String,
+    device: String,
+    zoom: Arc<AtomicU16>,
     recording: Option<PathBuf>,
     frame: Arc<Mutex<Option<(Vec<u8>, Instant)>>>,
 }
@@ -277,6 +285,7 @@ fn stop_camera(state: tauri::State<Runtime>) -> Result<(), String> {
 struct VideoFrame {
     session: String,
     data: String,
+    zoom: u16,
 }
 #[tauri::command]
 fn start_camera(
@@ -285,7 +294,7 @@ fn start_camera(
     app: tauri::AppHandle,
     state: tauri::State<Runtime>,
 ) -> Result<(), String> {
-    launch_camera(name, session, app, state, None)
+    launch_camera(name, session, app, state, None, Zoom::ORIGINAL)
 }
 fn launch_camera(
     name: String,
@@ -293,6 +302,7 @@ fn launch_camera(
     app: tauri::AppHandle,
     state: tauri::State<Runtime>,
     recording: Option<PathBuf>,
+    initial_zoom: Zoom,
 ) -> Result<(), String> {
     if state.finalization.is_running() {
         return Err("동영상 저장이 끝난 뒤 카메라를 시작하세요".into());
@@ -324,30 +334,44 @@ fn launch_camera(
         &format!("{name}:none"),
     ]);
     if let Some(path) = &recording {
-        recording::output_args(&mut command, path);
+        recording::output_args(&mut command, path, initial_zoom);
     }
-    let mut child=command.args(["-map","0:v:0","-vf","fps=8,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2","-pix_fmt","rgb24","-f","rawvideo","pipe:1"]).stdin(if recording.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(fs::File::create(root().join(if recording.is_some(){"recording.log"}else{"camera.log"})).map_err(err)?).spawn().map_err(err)?;
+    let preview_filter = format!("fps=8,{}", camera_control::FIT_FRAME);
+    let log = if recording.is_some() { "recording.log" } else { "camera.log" };
+    let stdin = if recording.is_some() { Stdio::piped() } else { Stdio::null() };
+    let mut child = command
+        .args(["-map", "0:v:0", "-vf", &preview_filter, "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"])
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(root().join(log)).map_err(err)?)
+        .spawn()
+        .map_err(err)?;
     let mut output = child.stdout.take().ok_or("카메라 출력 없음")?;
     let frame = Arc::new(Mutex::new(None));
     let latest = frame.clone();
     let session_clone = session.clone();
+    let zoom = Arc::new(AtomicU16::new(initial_zoom.percent()));
+    let active_zoom = zoom.clone();
     std::thread::spawn(move || {
         loop {
-            let mut buf = vec![0; 1280 * 720 * 3];
+            let mut buf = vec![0; (FRAME_WIDTH * FRAME_HEIGHT * 3) as usize];
             if output.read_exact(&mut buf).is_err() {
                 break;
             }
             let Ok(mut f) = latest.lock() else { break };
             *f = Some((buf.clone(), Instant::now()));
             drop(f);
-            if let Some(rgb) = image::RgbImage::from_raw(1280, 720, buf) {
-                let img = image::DynamicImage::ImageRgb8(rgb).thumbnail(960, 540);
+            if let Some(rgb) = image::RgbImage::from_raw(FRAME_WIDTH, FRAME_HEIGHT, buf) {
+                let frame_zoom =
+                    Zoom::new(active_zoom.load(Ordering::Relaxed)).unwrap_or(Zoom::ORIGINAL);
+                let img = image::DynamicImage::ImageRgb8(frame_zoom.apply(rgb, 960, 540));
                 let mut jpg = Cursor::new(Vec::new());
                 if img.write_to(&mut jpg, image::ImageFormat::Jpeg).is_ok() {
                     let _ = app.emit(
                         "camera-frame",
                         VideoFrame {
                             session: session_clone.clone(),
+                            zoom: frame_zoom.percent(),
                             data: format!(
                                 "data:image/jpeg;base64,{}",
                                 base64::engine::general_purpose::STANDARD.encode(jpg.into_inner())
@@ -361,11 +385,61 @@ fn launch_camera(
     });
     *live = Some(Live {
         child,
+        session,
+        device: name,
+        zoom,
         frame,
         recording,
     });
     Ok(())
 }
+#[tauri::command]
+fn set_camera_zoom(session: String, percent: u16, state: tauri::State<Runtime>) -> Result<(), String> {
+    let zoom = Zoom::new(percent)?;
+    let live = state.live.lock().map_err(err)?;
+    let cam = live
+        .as_ref()
+        .filter(|cam| cam.session == session)
+        .ok_or("카메라 연결이 종료됐습니다.")?;
+    if cam.recording.is_some() {
+        return Err("줌은 녹화를 시작하기 전에 조절해 주세요.".into());
+    }
+    cam.zoom.store(zoom.percent(), Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn autofocus(
+    session: String,
+    perform: bool,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Runtime>();
+        let live = state.live.lock().map_err(err)?;
+        let cam = live
+            .as_ref()
+            .filter(|cam| cam.session == session)
+            .ok_or("카메라 연결이 종료됐습니다.")?;
+        if cam.recording.is_some() {
+            return Ok(false);
+        }
+        let frame = cam.frame.lock().map_err(err)?;
+        if !frame.as_ref().is_some_and(|(_, when)| when.elapsed() <= Duration::from_secs(3)) {
+            return Ok(false);
+        }
+        drop(frame);
+        if perform {
+            camera_control::request_autofocus(&cam.device)?;
+            Ok(true)
+        } else {
+            Ok(camera_control::supports_autofocus(&cam.device))
+        }
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn capture(state: tauri::State<Runtime>) -> Result<Scene, String> {
     let mut live = state.live.lock().map_err(err)?;
@@ -381,7 +455,11 @@ fn capture(state: tauri::State<Runtime>) -> Result<Scene, String> {
         }
         bytes.clone()
     };
-    let p = save_frame(&bytes, 1280, 720)?;
+    let zoom = Zoom::new(cam.zoom.load(Ordering::Relaxed))?;
+    let rgb = image::RgbImage::from_raw(FRAME_WIDTH, FRAME_HEIGHT, bytes)
+        .ok_or("올바르지 않은 카메라 프레임입니다.")?;
+    let cropped = zoom.apply(rgb, FRAME_WIDTH, FRAME_HEIGHT);
+    let p = save_frame(cropped.as_raw(), FRAME_WIDTH, FRAME_HEIGHT)?;
     live.take();
     scene(&p)
 }
@@ -389,11 +467,13 @@ fn capture(state: tauri::State<Runtime>) -> Result<Scene, String> {
 fn start_recording(
     name: String,
     session: String,
+    zoom_percent: u16,
     app: tauri::AppHandle,
     state: tauri::State<Runtime>,
 ) -> Result<(), String> {
+    let zoom = Zoom::new(zoom_percent)?;
     let path = recording::new_path()?;
-    launch_camera(name, session, app, state, Some(path))
+    launch_camera(name, session, app, state, Some(path), zoom)
 }
 #[tauri::command]
 async fn stop_recording(state: tauri::State<'_, Runtime>) -> Result<recording::Video, String> {
@@ -603,6 +683,8 @@ fn main() {
             pick_vault,
             stop_camera,
             start_camera,
+            set_camera_zoom,
+            autofocus,
             capture,
             save_note,
             export_note,

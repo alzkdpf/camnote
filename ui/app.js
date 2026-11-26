@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const invoke=(command,args={})=>window.__TAURI__.core.invoke(command,args);
-const state={settings:null,devices:[],scenes:[],scene:null,page:'camera',session:null,live:false,frameAt:0,busy:false,manual:false,dirty:false,saveTimer:null,saveVersion:0,exported:false,detailTab:'chat',draining:false,drafts:{},recording:false,recordAt:0,videos:[]};
+const state={settings:null,devices:[],scenes:[],scene:null,page:'camera',session:null,live:false,frameAt:0,frameZoom:100,zoom:100,zoomApplied:100,zoomPending:null,focusSupport:null,focusPending:false,focusStatus:"",busy:false,manual:false,dirty:false,saveTimer:null,saveVersion:0,exported:false,detailTab:'chat',draining:false,drafts:{},recording:false,recordAt:0,videos:[]};
 function notice(text){$('notice-text').textContent=String(text);$('notice').hidden=false;}
 function clearNotice(){$('notice').hidden=true;}
 async function attempt(fn){try{await fn();}catch(e){notice(e);}}
@@ -30,7 +30,73 @@ function renderPage(){
 }
 function renderCamera(){
  const active=!!state.session;$('camera-idle').hidden=active;$('live-controls').hidden=!active;$('connecting').hidden=!active||!!state.frameAt;$('live-image').hidden=!active||!state.frameAt;$('live-tag').hidden=!active||!state.frameAt;$('device').disabled=active;$('refresh').disabled=active;$('start').disabled=state.busy;$('capture').disabled=state.recording||!state.frameAt||Date.now()-state.frameAt>3000;$('stop').hidden=state.recording;$('record').disabled=!state.recording&&(!state.frameAt||state.busy||Date.now()-state.frameAt>3000);$('record').classList.toggle('is-recording',state.recording);$('record-label').textContent=state.recording?'중지하고 저장':'녹화 시작';$('record-timer').hidden=!state.recording;$('live-label').textContent=state.recording?'녹화 중':'미리보기';$('live-tag').classList.toggle('recording',state.recording);
+ const fresh=active&&state.frameAt&&Date.now()-state.frameAt<=3000;
+ const zoomReady=!state.zoomPending&&state.frameZoom===state.zoom&&state.zoomApplied===state.zoom;
+ $('camera-adjustments').hidden=!active||!state.frameAt;
+ $('camera-zoom').disabled=state.recording||!fresh;
+ $('zoom-out').disabled=state.recording||!fresh||state.zoom<=100;
+ $('zoom-in').disabled=state.recording||!fresh||state.zoom>=300;
+ $('camera-zoom').value=state.zoom;
+ $('camera-zoom').setAttribute('aria-valuetext',`${state.zoom/100}배`);
+ $('zoom-value').textContent=`${state.zoom/100}×`;
+ $('autofocus').disabled=state.recording||!fresh||state.focusSupport!==true||state.focusPending;
+ $('focus-status').textContent=state.recording?'녹화 시작 전 선택한 줌을 적용 중':state.focusStatus;
+ if(!zoomReady){$('capture').disabled=true;if(!state.recording)$('record').disabled=true;}
  $('camera-footnote').textContent=state.recording?'영상만 녹화 중입니다. 중지하면 MP4 파일로 자동 저장됩니다.':active?(state.frameAt?'프레임을 확인한 뒤 장면을 촬영하세요.':'연결이 늦어지면 iPhone 잠금 상태를 확인하세요.'):'시작 버튼을 누를 때만 카메라가 켜집니다.';
+}
+function resetCameraControls(){
+ state.zoom=100;state.zoomApplied=100;state.frameZoom=100;state.zoomPending=null;
+ state.focusSupport=null;state.focusPending=false;state.focusStatus='';
+}
+async function stepZoom(delta){
+ if(!state.session||state.recording||!state.live||Date.now()-state.frameAt>3000)return;
+ $('camera-zoom').value=Math.max(100,Math.min(300,state.zoom+delta));
+ await selectZoom();
+}
+async function selectZoom(){
+ const session=state.session;
+ if(!session||state.recording)return;
+ state.zoom=Number($('camera-zoom').value);
+ if(state.zoomPending===session){renderCamera();return;}
+ state.zoomPending=session;renderCamera();
+ try{
+  while(state.session===session&&state.zoomApplied!==state.zoom){
+   const percent=state.zoom;
+   await invoke('set_camera_zoom',{session,percent});
+   if(state.session===session)state.zoomApplied=percent;
+  }
+ }catch(e){
+  if(state.session===session){state.zoom=state.zoomApplied;notice(e);}
+ }finally{
+  if(state.zoomPending===session)state.zoomPending=null;
+  if(state.session===session)renderCamera();
+ }
+}
+async function checkAutofocus(session){
+ if(state.focusSupport!==null||state.recording)return;
+ state.focusSupport=false;state.focusStatus='자동 초점 지원 여부 확인 중…';renderCamera();
+ try{
+  const supported=await invoke('autofocus',{session,perform:false});
+  if(state.session!==session)return;
+  state.focusSupport=supported;
+  state.focusStatus=supported?'':'이 연결에서는 초점을 직접 제어할 수 없어요.';
+ }catch(e){
+  if(state.session===session)state.focusStatus='이 연결에서는 초점을 직접 제어할 수 없어요.';
+ }
+ if(state.session===session)renderCamera();
+}
+async function refocus(){
+ const session=state.session;
+ if(!session||state.recording||!state.focusSupport||state.focusPending)return;
+ state.focusPending=true;state.focusStatus='';renderCamera();
+ try{
+  const accepted=await invoke('autofocus',{session,perform:true});
+  if(state.session===session)state.focusStatus=accepted?'자동 초점을 요청했어요.':'미리보기가 멈췄어요. 연결을 확인해 주세요.';
+ }catch(e){
+  if(state.session===session)state.focusStatus=String(e);
+ }finally{
+  if(state.session===session){state.focusPending=false;renderCamera();}
+ }
 }
 async function refreshDevices(){
  $('refresh').disabled=true;$('device-state').textContent='검색 중…';
@@ -40,13 +106,13 @@ async function refreshDevices(){
 }
 async function startCamera(){
  clearNotice();if(!$('device').value)await refreshDevices();const name=$('device').value;if(!name){$('connection-help').open=true;return;}
- const session=String(Date.now());state.session=session;state.frameAt=0;state.live=false;renderCamera();
+ const session=String(Date.now());resetCameraControls();state.session=session;state.frameAt=0;state.live=false;renderCamera();
  try{await invoke('start_camera',{name,session});if(state.session===session)state.live=true;}catch(e){state.session=null;renderCamera();throw e;}
 }
 function renderVideos(){const list=$('video-list');list.replaceChildren();$('videos-empty').hidden=state.videos.length>0;for(const v of state.videos){const row=document.createElement('div');row.className='video-row';const text=document.createElement('div');const name=document.createElement('strong');name.textContent=v.name;const size=document.createElement('p');size.className='quiet';size.textContent=(v.bytes/1048576).toFixed(1)+' MB · MP4';text.append(name,size);const buttons=document.createElement('div');for(const [label,action] of [['재생',()=>invoke('open_video',{path:v.path,reveal:false})],['Finder에서 보기',()=>invoke('open_video',{path:v.path,reveal:true})],['다른 이름으로 저장',async()=>{const p=await invoke('save_video',{path:v.path});if(p)notice('동영상을 저장했습니다.');}]]){const b=document.createElement('button');b.className='button';b.textContent=label;b.onclick=()=>attempt(action);buttons.append(b);}row.append(text,buttons);list.append(row);}}
-async function startRecording(){if(state.busy||state.recording||!state.frameAt)return;clearNotice();const name=$('device').value,session=String(Date.now());state.recording=true;state.recordAt=0;state.session=session;state.frameAt=0;setBusy(true,'record');renderCamera();try{await invoke('start_recording',{name,session});state.live=true;}catch(e){state.recording=false;state.session=null;state.live=false;setBusy(false,'record');renderCamera();throw e;}}
+async function startRecording(){if(state.busy||state.recording||!state.frameAt||state.zoomPending||state.frameZoom!==state.zoom||state.zoomApplied!==state.zoom)return;clearNotice();const name=$('device').value,session=String(Date.now()),zoomPercent=state.zoom;state.recording=true;state.recordAt=0;state.session=session;state.frameAt=0;setBusy(true,'record');renderCamera();try{await invoke('start_recording',{name,session,zoomPercent});state.live=true;}catch(e){state.recording=false;state.session=null;state.live=false;setBusy(false,'record');renderCamera();throw e;}}
 async function stopRecording(){if(!state.recording)return;state.session=null;state.live=false;state.frameAt=0;$('record').disabled=true;$('record-label').textContent='저장 중…';try{const video=await invoke('stop_recording');state.videos=await invoke('recordings');notice('동영상이 저장되었습니다. '+video.name);}finally{state.recording=false;state.recordAt=0;state.videos=await invoke('recordings').catch(()=>state.videos);setBusy(false,'record');renderCamera();renderVideos();}}
-async function captureScene(){const scene=await invoke('capture');state.session=null;state.live=false;state.frameAt=0;upsert(scene);await selectScene(scene);}
+async function captureScene(){if(state.recording||!state.frameAt||state.zoomPending||state.frameZoom!==state.zoom||state.zoomApplied!==state.zoom)return;const scene=await invoke('capture');state.session=null;state.live=false;state.frameAt=0;upsert(scene);await selectScene(scene);}
 function upsert(s){const i=state.scenes.findIndex(v=>v.path===s.path);if(i<0)state.scenes.unshift(s);else state.scenes[i]=s;}
 async function selectScene(s){if(state.busy)return;if(state.scene)state.drafts[state.scene.path]={text:$('chat-input').value,mode:$('chat-mode').value};await flushNote();if(state.session)await stopCamera();state.scene=s;state.manual=false;state.exported=false;state.dirty=false;state.detailTab='chat';$('chat-input').value=state.drafts[s.path]?.text||'';$('chat-mode').value=state.drafts[s.path]?.mode||'adjust';$('transform-form').hidden=true;state.page='scene';clearNotice();renderPage();}
 function renderScene(){if(!state.scene)return;const s=state.scene;if(s.chat_error)notice(s.chat_error);const h=s.chat||{messages:[],revisions:[],active:null};$('scene-image').src=h.active&&s.generated?s.generated:s.preview;$('original').classList.toggle('selected',!h.active);$('generated').classList.toggle('selected',!!h.active);$('generated').hidden=!h.revisions.length;$('image-prompt').value=state.settings.image_instruction;$('note').value=s.body;showNote(!!s.body||state.manual);$('save-state').textContent=s.body?'자동 저장됨':'';updateVault();$('send').hidden=state.exported;$('reopen').hidden=!state.exported;
@@ -82,6 +148,8 @@ function bind(){
  $('first-capture').onclick=$('new-capture').onclick=()=>attempt(()=>navigate('camera'));
  $('import').onclick=$('first-import').onclick=()=>attempt(importImage);$('refresh').onclick=()=>attempt(refreshDevices);$('start').onclick=()=>attempt(startCamera);$('stop').onclick=()=>attempt(stopCamera);$('capture').onclick=()=>attempt(captureScene);$('record').onclick=()=>attempt(state.recording?stopRecording:startRecording);$('video-camera').onclick=()=>attempt(()=>navigate('camera'));
  $('iphone-help').onclick=()=>{$('connection-help').open=true;$('connection-help').scrollIntoView({behavior:'smooth',block:'nearest'});};
+ $('zoom-out').onclick=()=>stepZoom(-25);$('zoom-in').onclick=()=>stepZoom(25);
+ $('camera-zoom').oninput=selectZoom;$('autofocus').onclick=refocus;
  $('device').onchange=()=>{state.settings.camera_name=$('device').value;attempt(()=>invoke('update_settings',{value:state.settings}));};
  $('original').onclick=()=>attempt(()=>chooseRevision(null));$('generated').onclick=()=>{const h=state.scene?.chat;if(h?.revisions.length)attempt(()=>chooseRevision(h.active||h.revisions.at(-1).id));};
  $('revision').onchange=()=>attempt(()=>chooseRevision($('revision').value||null));$('save-photo').onclick=()=>attempt(async()=>{const path=await invoke('save_photo',{path:state.scene.path});if(path)notice('현재 사진을 저장했습니다.');});
@@ -96,11 +164,11 @@ function bind(){
  $('choose-vault').onclick=()=>attempt(async()=>{const p=await invoke('pick_vault');if(p){$('vault').value=p;await saveSettings();}});
  $('recover-data').onclick=()=>attempt(async()=>{await flushNote();setBusy(true,'recovery');try{const r=await invoke('recover_data');if(r){state.settings=await invoke('settings');fillSettings();updateVault();state.scenes=await invoke('library');renderLibrary();await loadStorage();$('settings-status').textContent=r.already_done?'이미 복구한 폴더입니다.':`복구 완료 · ${r.copied}개 파일 저장. 보관함에서 확인하세요.`;}}finally{setBusy(false,'recovery');}});
  $('save-settings').onclick=()=>attempt(saveSettings);$('provider').onchange=providerHint;$('install-plugin').onclick=()=>attempt(async()=>{await saveSettings();await invoke('plugin_install');$('settings-status').textContent='설치 완료 · Obsidian에서 CamNote 플러그인을 켜세요.';});
- document.addEventListener('keydown',event=>{const editing=/INPUT|TEXTAREA|SELECT/.test(event.target.tagName);if(event.metaKey&&event.key===','){event.preventDefault();attempt(()=>navigate('settings'));}else if(event.metaKey&&event.key==='o'){event.preventDefault();attempt(importImage);}else if(event.metaKey&&event.key==='s'){event.preventDefault();attempt(flushNote);}else if(event.code==='Space'&&!editing&&state.page==='camera'){event.preventDefault();attempt(state.frameAt?captureScene:state.session?async()=>{}:startCamera);}});
- setInterval(()=>{if(state.recording){const sec=state.recordAt?Math.floor((Date.now()-state.recordAt)/1000):0;$('record-timer').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');}if(state.session&&state.frameAt&&Date.now()-state.frameAt>3000){$('capture').disabled=true;$('camera-footnote').textContent='영상 수신이 멈췄습니다. iPhone 연결을 확인하거나 카메라를 다시 시작하세요.';}},1000);
+ document.addEventListener('keydown',event=>{const editing=/INPUT|TEXTAREA|SELECT|BUTTON/.test(event.target.tagName);if(event.metaKey&&event.key===','){event.preventDefault();attempt(()=>navigate('settings'));}else if(event.metaKey&&event.key==='o'){event.preventDefault();attempt(importImage);}else if(event.metaKey&&event.key==='s'){event.preventDefault();attempt(flushNote);}else if(event.code==='Space'&&!editing&&state.page==='camera'){event.preventDefault();attempt(state.frameAt?captureScene:state.session?async()=>{}:startCamera);}});
+ setInterval(()=>{if(state.recording){const sec=state.recordAt?Math.floor((Date.now()-state.recordAt)/1000):0;$('record-timer').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');}if(state.session&&state.frameAt&&Date.now()-state.frameAt>3000){renderCamera();$('camera-footnote').textContent='영상 수신이 멈췄습니다. iPhone 연결을 확인하거나 카메라를 다시 시작하세요.';}},1000);
 }
 async function init(){bind();try{
- await window.__TAURI__.event.listen('camera-frame',event=>{const f=event.payload;if(f.session!==state.session)return;state.frameAt=Date.now();if(state.recording&&!state.recordAt)state.recordAt=Date.now();$('live-image').src=f.data;renderCamera();});
+ await window.__TAURI__.event.listen('camera-frame',event=>{const f=event.payload;if(f.session!==state.session||f.zoom!==state.zoom)return;state.frameZoom=f.zoom;state.frameAt=Date.now();if(state.recording&&!state.recordAt)state.recordAt=Date.now();$('live-image').src=f.data;renderCamera();void checkAutofocus(f.session);});
  await window.__TAURI__.event.listen('camera-ended',event=>{if(event.payload!==state.session)return;if(state.recording){attempt(async()=>{await stopRecording();notice('카메라 연결이 종료되었습니다. 동영상 목록에서 저장된 파일을 확인하세요.');});return;}state.session=null;state.live=false;renderCamera();notice('카메라 연결이 종료됐습니다. 장치를 확인한 뒤 다시 시작하세요.');});
  await window.__TAURI__.event.listen('photos-available',()=>attempt(drainOpenPhotos));
  if(window.__TAURI__.webview?.getCurrentWebview)await window.__TAURI__.webview.getCurrentWebview().onDragDropEvent(event=>{if(event.payload.type==='enter')$('drop-overlay').hidden=state.busy;else if(event.payload.type==='drop'){$('drop-overlay').hidden=true;if(state.busy)notice('작업이 끝난 뒤 사진을 다시 놓아주세요.');else attempt(()=>importPaths(event.payload.paths));}else if(event.payload.type==='leave')$('drop-overlay').hidden=true;});

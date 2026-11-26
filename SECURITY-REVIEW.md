@@ -31,6 +31,13 @@ Review date: 2026-11-25. Scope: CamNote-specific Rust, frontend, Obsidian plugin
 - cargo-audit 0.23.0 against the RustSec database reports zero known vulnerabilities in the lockfile. Six informational warnings remain: chrono (RUSTSEC-2026-0543), proc-macro-error (RUSTSEC-2024-0370), zbus_names (RUSTSEC-2026-0371), zvariant (RUSTSEC-2026-0370), zvariant_derive (RUSTSEC-2026-0372), and glib (RUSTSEC-2024-0429). None is in the resolved `aarch64-apple-darwin` build graph; they remain optional or other-platform lockfile entries. They are not silently ignored, and other platforms are not supported by this release.
 - The release app and mounted DMG are checked for personal names, build-user paths, unexpected payloads and sensitive files. Ad hoc code signing, image integrity and SHA-256 checksums are verified. No test photos, notes, logs or settings are shipped.
 
+## v0.4.1 camera controls verification
+
+- Rust unit tests: 22 passed; the authenticated Codex smoke test was not run.
+- The opt-in synthetic FFmpeg recording test passed, including 2× crop pixel checks, dual preview/MP4 output, graceful stop and full decode.
+- Six JavaScript tests passed, covering camera zoom serialization, matching-frame capture gating, recording zoom, autofocus capability/request handling, zoom button limits and recording/stale-preview locks, plus Obsidian delegation.
+- Native autofocus compiled on Apple Silicon. Actual lens movement and iPhone camera control remain unverified; unsupported cameras keep the focus button disabled.
+
 ## Limitations
 
 This preview is not Apple notarized and has no Developer ID signature; ad hoc signing does not establish publisher identity. It targets Apple Silicon and macOS 13+. macOS may block it. No global security bypass is supplied.
